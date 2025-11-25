@@ -6,11 +6,11 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/claude"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/gemini"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/openai"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -117,10 +117,7 @@ func (m *AmpModule) registerManagementRoutes(engine *gin.Engine, baseHandler *ha
 	// If no local OAuth is available, falls back to ampcode.com proxy.
 	geminiHandlers := gemini.NewGeminiAPIHandler(baseHandler)
 	geminiBridge := createGeminiBridgeHandler(geminiHandlers)
-	geminiV1Beta1Fallback := NewFallbackHandler(func() *httputil.ReverseProxy {
-		return m.proxy
-	})
-	geminiV1Beta1Handler := geminiV1Beta1Fallback.WrapHandler(geminiBridge)
+	geminiV1Beta1Handler := geminiBridge
 
 	// Route POST model calls through Gemini bridge when a local provider exists, otherwise proxy.
 	// All other methods (e.g., GET model listing) always proxy to upstream to preserve Amp CLI behavior.
@@ -142,8 +139,8 @@ func (m *AmpModule) registerManagementRoutes(engine *gin.Engine, baseHandler *ha
 				}
 			}
 		}
-		// Non-POST or no local provider available -> proxy upstream
-		proxyHandler(c)
+		// Non-POST or no local provider available -> return 404
+		c.JSON(404, gin.H{"error": "Provider not found and fallback is disabled"})
 	})
 }
 
@@ -159,12 +156,6 @@ func (m *AmpModule) registerProviderAliases(engine *gin.Engine, baseHandler *han
 	geminiHandlers := gemini.NewGeminiAPIHandler(baseHandler)
 	claudeCodeHandlers := claude.NewClaudeCodeAPIHandler(baseHandler)
 	openaiResponsesHandlers := openai.NewOpenAIResponsesAPIHandler(baseHandler)
-
-	// Create fallback handler wrapper that forwards to ampcode.com when provider not found
-	// Uses lazy evaluation to access proxy (which is created after routes are registered)
-	fallbackHandler := NewFallbackHandler(func() *httputil.ReverseProxy {
-		return m.proxy
-	})
 
 	// Provider-specific routes under /api/provider/:provider
 	ampProviders := engine.Group("/api/provider")
@@ -192,9 +183,9 @@ func (m *AmpModule) registerProviderAliases(engine *gin.Engine, baseHandler *han
 	// Root-level routes (for providers that omit /v1, like groq/cerebras)
 	// Wrap handlers with fallback logic to forward to ampcode.com when provider not found
 	provider.GET("/models", ampModelsHandler) // Models endpoint doesn't need fallback (no body to check)
-	provider.POST("/chat/completions", fallbackHandler.WrapHandler(openaiHandlers.ChatCompletions))
-	provider.POST("/completions", fallbackHandler.WrapHandler(openaiHandlers.Completions))
-	provider.POST("/responses", fallbackHandler.WrapHandler(openaiResponsesHandlers.Responses))
+	provider.POST("/chat/completions", openaiHandlers.ChatCompletions)
+	provider.POST("/completions", openaiHandlers.Completions)
+	provider.POST("/responses", openaiResponsesHandlers.Responses)
 
 	// /v1 routes (OpenAI/Claude-compatible endpoints)
 	v1Amp := provider.Group("/v1")
@@ -202,13 +193,13 @@ func (m *AmpModule) registerProviderAliases(engine *gin.Engine, baseHandler *han
 		v1Amp.GET("/models", ampModelsHandler) // Models endpoint doesn't need fallback
 
 		// OpenAI-compatible endpoints with fallback
-		v1Amp.POST("/chat/completions", fallbackHandler.WrapHandler(openaiHandlers.ChatCompletions))
-		v1Amp.POST("/completions", fallbackHandler.WrapHandler(openaiHandlers.Completions))
-		v1Amp.POST("/responses", fallbackHandler.WrapHandler(openaiResponsesHandlers.Responses))
+		v1Amp.POST("/chat/completions", openaiHandlers.ChatCompletions)
+		v1Amp.POST("/completions", openaiHandlers.Completions)
+		v1Amp.POST("/responses", openaiResponsesHandlers.Responses)
 
 		// Claude/Anthropic-compatible endpoints with fallback
-		v1Amp.POST("/messages", fallbackHandler.WrapHandler(claudeCodeHandlers.ClaudeMessages))
-		v1Amp.POST("/messages/count_tokens", fallbackHandler.WrapHandler(claudeCodeHandlers.ClaudeCountTokens))
+		v1Amp.POST("/messages", claudeCodeHandlers.ClaudeMessages)
+		v1Amp.POST("/messages/count_tokens", claudeCodeHandlers.ClaudeCountTokens)
 	}
 
 	// /v1beta routes (Gemini native API)
@@ -216,7 +207,7 @@ func (m *AmpModule) registerProviderAliases(engine *gin.Engine, baseHandler *han
 	v1betaAmp := provider.Group("/v1beta")
 	{
 		v1betaAmp.GET("/models", geminiHandlers.GeminiModels)
-		v1betaAmp.POST("/models/:action", fallbackHandler.WrapHandler(geminiHandlers.GeminiHandler))
+		v1betaAmp.POST("/models/:action", geminiHandlers.GeminiHandler)
 		v1betaAmp.GET("/models/:action", geminiHandlers.GeminiGetHandler)
 	}
 }
